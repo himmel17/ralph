@@ -26,6 +26,12 @@ cd flowchart && npm run build
 - `prompt.md` - Instructions given to each AMP instance
 -  `CLAUDE.md` - Instructions given to each Claude Code instance
 - `prd.json.example` - Example PRD format
+- `ralph-safe.sh` - Runs `ralph.sh` with `gh` logged out and pushing disabled
+- `ralph-pr.sh` - Pushes the branch and opens the PR from `prd.json` after the loop (never merges)
+- `ralph-lib.sh` - Helpers shared by `ralph-safe.sh` and `ralph-pr.sh`
+- `skills/ralph-issue/` - Skill that converts a GitHub Issue to `prd.json`
+- `tests/test-ralph-pr.sh` - Offline tests for `ralph-pr.sh` (`bash tests/test-ralph-pr.sh`)
+- `README.ja.md` - Japanese translation of `README.md`
 - `flowchart/` - Interactive React Flow diagram explaining how Ralph works
 
 ## Flowchart
@@ -45,3 +51,6 @@ npm run dev
 - Memory persists via git history, `progress.txt`, and `prd.json`
 - Stories should be small enough to complete in one context window
 - Always update AGENTS.md with discovered patterns for future iterations
+- `README.md` is the source of truth; when you change it, update `README.ja.md` to match (same sections, same order)
+- The loop never talks to GitHub: issues are read before it (`ralph-issue` skill) and PRs are opened after it (`ralph-pr.sh`)
+- Read `jq` output through `ralph_jq` in `ralph-lib.sh`: native Windows `jq` emits CRLF, and on Git Bash both `$(...)` and `grep` hide the `\r`, so check for it with `tr -cd '\r' | wc -c`

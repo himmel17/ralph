@@ -106,3 +106,5 @@ If there are still stories with `passes: false`, end your response normally (ano
 - Commit frequently
 - Keep CI green
 - Read the Codebase Patterns section in progress.txt before starting
+- When you update `prd.json`, change only the story you worked on and keep every other field (such as `source`) exactly as it is
+- Never push, open pull requests, or touch GitHub Issues - a human publishes the branch after the loop
