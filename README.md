@@ -1,5 +1,7 @@
 # Ralph
 
+[日本語](README.ja.md)
+
 ![Ralph](ralph.webp)
 
 Ralph is an autonomous AI agent loop that runs AI coding tools ([Amp](https://ampcode.com) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code)) repeatedly until all PRD items are complete. Each iteration is a fresh instance with clean context. Memory persists via git history, `progress.txt`, and `prd.json`.
@@ -15,6 +17,7 @@ Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`)
 - `jq` installed (`brew install jq` on macOS)
 - A git repository for your project
+- Optional: [GitHub CLI](https://cli.github.com) (`gh`) installed and authenticated, for the [GitHub Issue workflow](#github-issue-workflow-optional)
 
 ## Setup
 
@@ -33,6 +36,10 @@ cp /path/to/ralph/prompt.md scripts/ralph/prompt.md    # For Amp
 cp /path/to/ralph/CLAUDE.md scripts/ralph/CLAUDE.md    # For Claude Code
 
 chmod +x scripts/ralph/ralph.sh
+
+# Optional: GitHub Issue workflow (all three files are needed)
+cp /path/to/ralph/ralph-safe.sh /path/to/ralph/ralph-pr.sh /path/to/ralph/ralph-lib.sh scripts/ralph/
+chmod +x scripts/ralph/ralph-safe.sh scripts/ralph/ralph-pr.sh
 ```
 
 ### Option 2: Install skills globally (Amp)
@@ -43,12 +50,14 @@ For AMP
 ```bash
 cp -r skills/prd ~/.config/amp/skills/
 cp -r skills/ralph ~/.config/amp/skills/
+cp -r skills/ralph-issue ~/.config/amp/skills/
 ```
 
 For Claude Code (manual)
 ```bash
 cp -r skills/prd ~/.claude/skills/
 cp -r skills/ralph ~/.claude/skills/
+cp -r skills/ralph-issue ~/.claude/skills/
 ```
 
 ### Option 3: Use as Claude Code Marketplace
@@ -68,10 +77,12 @@ Then install the skills:
 Available skills after installation:
 - `/prd` - Generate Product Requirements Documents
 - `/ralph` - Convert PRDs to prd.json format
+- `/ralph-issue` - Convert a GitHub Issue to prd.json format
 
 Skills are automatically invoked when you ask Claude to:
 - "create a prd", "write prd for", "plan this feature"
 - "convert this prd", "turn into ralph format", "create prd.json"
+- "convert issue to prd.json", "run ralph on issue #12"
 
 ### Configure Amp auto-handoff (recommended)
 
@@ -129,6 +140,83 @@ Ralph will:
 7. Append learnings to `progress.txt`
 8. Repeat until all stories pass or max iterations reached
 
+## GitHub Issue Workflow (Optional)
+
+Use this when your requirements live in GitHub Issues. The loop itself never talks to GitHub: the issue is read before the loop, and the pull request is opened after it, by you.
+
+**One issue = one `prd.json` = one branch = one PR.** The issue describes a feature. The user stories it is split into exist only in `prd.json`; do not create one issue per story.
+
+### 1. Write the issue
+
+The issue body is the requirements document. You can write it with the PRD skill and post it:
+
+```bash
+gh issue create --title "Task Priority System" --body-file tasks/prd-task-priority.md
+```
+
+### 2. Convert the issue to prd.json
+
+```
+Load the ralph-issue skill and convert issue #12 to prd.json
+```
+
+The skill reads the issue, applies the same rules as the `ralph` skill, shows you the story split for approval, and records the origin in `prd.json`:
+
+```json
+"source": {
+  "type": "github-issue",
+  "issue": 12,
+  "url": "https://github.com/OWNER/REPO/issues/12",
+  "issueUpdatedAt": "2026-09-01T12:34:56Z"
+}
+```
+
+`prd.json` is a snapshot. If the issue's requirements change, convert it again instead of editing `prd.json` by hand. `ralph-safe.sh` and `ralph-pr.sh` warn when the issue changed after conversion (comments and label changes also trigger the warning).
+
+### 3. Run the loop with GitHub access disabled
+
+```bash
+./scripts/ralph/ralph-safe.sh --tool claude [max_iterations]
+```
+
+`ralph-safe.sh` passes its arguments to `ralph.sh`. While the loop runs, `gh` is logged out (an empty `GH_CONFIG_DIR`) and the push URL of `origin` is set to `DISABLED`. Both are restored when the loop ends; if the script is killed, the next run restores the push URL first. Set `RALPH_REMOTE` to protect a remote other than `origin`.
+
+This guards against accidents. It is not a sandbox: an agent running without permission checks could undo it.
+
+### 4. Review locally, then open the PR
+
+Until you push, a bad run costs nothing: reset the branch and run again. When the result looks right:
+
+```bash
+./scripts/ralph/ralph-pr.sh --dry-run   # Print the PR body and the commands, change nothing
+./scripts/ralph/ralph-pr.sh             # Commit leftover Ralph state, push, open the PR
+```
+
+- All stories pass: a regular PR with `Closes #12`.
+- Some stories still fail: a **draft** PR with `Refs #12`, so merging it cannot close the issue.
+- A PR for the branch is already open: only its body is updated.
+- `prd.json` has no `source`: pass `--issue 12`, or omit it to open a PR that references no issue.
+
+The PR body lists every story with its status and notes. `ralph-pr.sh` refuses to run on the wrong branch or with uncommitted changes other than `prd.json` and `progress.txt`.
+
+### 5. Merge it yourself
+
+Nothing in Ralph merges. Story status is reported by the agent itself, so review the PR like any other. GitHub closes the issue when a PR with `Closes #12` is merged into the **default branch**; opening the PR, or merging it elsewhere, does not.
+
+Keep issues small. Every story lands in one PR, and the loop does not pick up changes made to the default branch while it runs.
+
+### Windows
+
+Run the scripts through Git Bash: `bash scripts/ralph/ralph-safe.sh --tool claude 10`. Native Windows builds of `jq` write CRLF line endings; the scripts strip them.
+
+### Tests
+
+```bash
+bash tests/test-ralph-pr.sh
+```
+
+The tests run `ralph-pr.sh --dry-run` in a temporary repository with a stub `gh`, so they need no network access.
+
 ## Key Files
 
 | File | Purpose |
@@ -141,6 +229,11 @@ Ralph will:
 | `progress.txt` | Append-only learnings for future iterations |
 | `skills/prd/` | Skill for generating PRDs (works with Amp and Claude Code) |
 | `skills/ralph/` | Skill for converting PRDs to JSON (works with Amp and Claude Code) |
+| `skills/ralph-issue/` | Skill for converting a GitHub Issue to JSON |
+| `ralph-safe.sh` | Runs `ralph.sh` with `gh` logged out and pushing disabled |
+| `ralph-pr.sh` | Pushes the branch and opens the PR from `prd.json` after the loop |
+| `ralph-lib.sh` | Helpers shared by `ralph-safe.sh` and `ralph-pr.sh` |
+| `tests/` | Offline tests for `ralph-pr.sh` |
 | `.claude-plugin/` | Plugin manifest for Claude Code marketplace discovery |
 | `flowchart/` | Interactive visualization of how Ralph works |
 
