@@ -62,11 +62,13 @@ cp -r skills/ralph-issue ~/.claude/skills/
 
 ### Option 3: Claude Code Marketplace として使う
 
-Ralph の marketplace を Claude Code に追加します。
+この fork の marketplace を Claude Code に追加します。
 
 ```bash
-/plugin marketplace add snarktank/ralph
+/plugin marketplace add himmel17/ralph
 ```
+
+`snarktank/ralph` ではなく、この fork を指定してください。upstream の marketplace には `ralph-issue` skill が含まれません。どちらの marketplace も名前が `ralph-marketplace` で、Claude Code は同じ名前の marketplace を 1 つしか保持しないので、この fork を追加すると upstream の登録は置き換えられます。
 
 続いて skill をインストールします。
 
@@ -83,6 +85,8 @@ Claude に次のように頼むと、skill が自動的に呼び出されます�
 - "create a prd", "write prd for", "plan this feature"
 - "convert this prd", "turn into ralph format", "create prd.json"
 - "convert issue to prd.json", "run ralph on issue #12"
+
+plugin がインストールするのは skill だけです。`ralph.sh`、`ralph-safe.sh`、`ralph-pr.sh`、`ralph-lib.sh` は、Option 1 と同じようにプロジェクトへコピーする必要があります。
 
 ### Amp の auto-handoff を設定する（推奨）
 

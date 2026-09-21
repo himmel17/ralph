@@ -62,11 +62,13 @@ cp -r skills/ralph-issue ~/.claude/skills/
 
 ### Option 3: Use as Claude Code Marketplace
 
-Add the Ralph marketplace to Claude Code:
+Add this fork's marketplace to Claude Code:
 
 ```bash
-/plugin marketplace add snarktank/ralph
+/plugin marketplace add himmel17/ralph
 ```
+
+Use this fork, not `snarktank/ralph`: the upstream marketplace does not include the `ralph-issue` skill. Both marketplaces are named `ralph-marketplace`, and Claude Code keeps one marketplace per name, so adding this one replaces an upstream registration.
 
 Then install the skills:
 
@@ -83,6 +85,8 @@ Skills are automatically invoked when you ask Claude to:
 - "create a prd", "write prd for", "plan this feature"
 - "convert this prd", "turn into ralph format", "create prd.json"
 - "convert issue to prd.json", "run ralph on issue #12"
+
+The plugin installs the skills only. `ralph.sh`, `ralph-safe.sh`, `ralph-pr.sh` and `ralph-lib.sh` still have to be copied into your project as in Option 1.
 
 ### Configure Amp auto-handoff (recommended)
 
