@@ -7,7 +7,7 @@ You are an autonomous coding agent working on a software project.
 1. Read the PRD at `prd.json` (in the same directory as this file)
 2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
 3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create from main.
-4. Pick the **highest priority** user story where `passes: false`
+4. Pick the **highest priority** user story where `passes: false`. If any story has `blocked: true`, do no work: say that a human must clear it and end your response
 5. Implement that single user story
 6. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)
 7. Update AGENTS.md files if you discover reusable patterns (see below)
@@ -91,6 +91,19 @@ For any story that changes UI, you MUST verify it works in the browser:
 
 A frontend story is NOT complete until browser verification passes.
 
+## Problems You Discover
+
+Nobody is watching the loop, so nothing you only mention in your reply will be seen. Record what you find in `prd.json`, in exactly one of these ways:
+
+- **The PRD cannot be finished without it** (a missing prerequisite, a story too big for one iteration): add a story to `userStories`, or split the story. Give it a new id, a `priority` that keeps dependency order, `passes: false`, and the reason in `notes`. Add at most 3 stories per run, and never for work the PRD does not need.
+- **Anything else** (an existing bug, tech debt, an idea): do NOT fix it. Append it to the top-level `followUps` array, which a human turns into issues after the loop. Read the existing entries first and do not add a duplicate.
+  ```json
+  {"id": "FU-001", "title": "Short issue title", "body": "What is wrong and how to reproduce it", "kind": "bug", "foundIn": "US-003", "evidence": "src/date.ts:40", "issue": null}
+  ```
+  `kind` is one of `bug`, `debt`, `idea`, `question`. Always write `"issue": null`.
+- **You cannot complete the story yourself** (the requirements contradict each other, a credential or an external service is missing, or progress.txt shows an earlier iteration failing the same way): set `"blocked": true` and a `"blockedReason"` on the story that says what a human must do. Do not commit broken code. The loop stops until a human clears it.
+- **A story with `passes: true` is broken:** set it back to `passes: false` and say why in its `notes`.
+
 ## Stop Condition
 
 After completing a user story, check if ALL stories have `passes: true`.
@@ -106,5 +119,5 @@ If there are still stories with `passes: false`, end your response normally (ano
 - Commit frequently
 - Keep CI green
 - Read the Codebase Patterns section in progress.txt before starting
-- When you update `prd.json`, change only the story you worked on and keep every other field (such as `source`) exactly as it is
+- When you update `prd.json`, change only the story you worked on and keep every other field (such as `source`) exactly as it is. The only exceptions are listed under Problems You Discover
 - Never push, open pull requests, or touch GitHub Issues - a human publishes the branch after the loop

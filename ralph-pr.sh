@@ -1,14 +1,20 @@
 #!/bin/bash
 # Ralph PR publisher - pushes the Ralph branch and opens a PR from prd.json
-# Usage: ./ralph-pr.sh [--dry-run] [--issue N]
+# Usage: ./ralph-pr.sh [--dry-run] [--issue N] [--no-followups]
 #
 # Run this yourself after the loop has finished and you have looked at the
 # result. It never merges: a human reviews and merges the PR.
+#
+# Entries the agent left in prd.json "followUps" are filed as new issues first
+# (skip with --no-followups). They get the label $RALPH_FOLLOWUP_LABEL
+# (default: ralph-followup) if the repository has it.
 
 set -e
 
 DRY_RUN=false
 ISSUE_OVERRIDE=""
+FILE_FOLLOWUPS=true
+FOLLOWUP_LABEL="${RALPH_FOLLOWUP_LABEL-ralph-followup}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -24,9 +30,13 @@ while [[ $# -gt 0 ]]; do
       ISSUE_OVERRIDE="${1#*=}"
       shift
       ;;
+    --no-followups)
+      FILE_FOLLOWUPS=false
+      shift
+      ;;
     *)
       echo "Error: Unknown argument '$1'."
-      echo "Usage: ./ralph-pr.sh [--dry-run] [--issue N]"
+      echo "Usage: ./ralph-pr.sh [--dry-run] [--issue N] [--no-followups]"
       exit 1
       ;;
   esac
@@ -121,6 +131,57 @@ else
 fi
 
 SLUG=$(ralph_repo_slug "$REMOTE")
+if [ "$DRY_RUN" = false ] && [ -z "$SLUG" ]; then
+  echo "Error: Could not determine OWNER/REPO from remote '$REMOTE'."
+  exit 1
+fi
+
+# File the follow-ups the agent recorded, one issue each. The number is written
+# back to prd.json right away, so running again never files one twice. A
+# failure here (issues disabled, for example) does not stop the PR.
+PENDING_FOLLOWUPS=$(ralph_jq '(.followUps // []) | to_entries[] | select(.value.issue == null) | .key' "$PRD_FILE")
+if [ "$FILE_FOLLOWUPS" = true ] && [ "$DRY_RUN" = false ] && [ -n "$PENDING_FOLLOWUPS" ]; then
+  LABEL_ARGS=()
+  if [ -n "$FOLLOWUP_LABEL" ] && gh label list -R "$SLUG" --search "$FOLLOWUP_LABEL" --json name --jq '.[].name' 2>/dev/null | tr -d '' | grep -qxF -- "$FOLLOWUP_LABEL"; then
+    LABEL_ARGS=(--label "$FOLLOWUP_LABEL")
+  fi
+  FOLLOWUP_BODY=$(mktemp)
+  FILED_ANY=false
+  for INDEX in $PENDING_FOLLOWUPS; do
+    FOLLOWUP_TITLE=$(ralph_jq --argjson i "$INDEX" '.followUps[$i].title // empty' "$PRD_FILE")
+    if [ -z "$FOLLOWUP_TITLE" ]; then
+      echo "Warning: followUps[$INDEX] has no title. Skipped."
+      continue
+    fi
+    ralph_jq --argjson i "$INDEX" --arg issue "$ISSUE" '.followUps[$i] |
+      (.body // "") + "
+
+"
+      + (if (.evidence // "") != "" then "**Evidence:** " + .evidence + "
+
+" else "" end)
+      + "---
+Found by the Ralph loop"
+      + (if $issue != "" then " while working on #" + $issue else "" end)
+      + (if (.foundIn // "") != "" then " (story " + .foundIn + ")" else "" end)
+      + ". Reported by an agent and not verified by a human."' "$PRD_FILE" > "$FOLLOWUP_BODY"
+    FOLLOWUP_URL=$(gh issue create -R "$SLUG" --title "$FOLLOWUP_TITLE" --body-file "$FOLLOWUP_BODY" "${LABEL_ARGS[@]}" | tr -d '' | tail -n 1)
+    FOLLOWUP_NUMBER="${FOLLOWUP_URL##*/}"
+    if [[ ! "$FOLLOWUP_NUMBER" =~ ^[0-9]+$ ]]; then
+      echo "Warning: Could not file follow-up '$FOLLOWUP_TITLE'. It stays in prd.json; run again to retry."
+      continue
+    fi
+    jq --argjson i "$INDEX" --argjson n "$FOLLOWUP_NUMBER" '.followUps[$i].issue = $n' "$PRD_FILE" | tr -d '' > "$PRD_FILE.tmp"
+    mv "$PRD_FILE.tmp" "$PRD_FILE"
+    FILED_ANY=true
+    echo "Filed follow-up #$FOLLOWUP_NUMBER: $FOLLOWUP_TITLE"
+  done
+  rm -f "$FOLLOWUP_BODY"
+  if [ "$FILED_ANY" = true ] && [[ ! " ${STATE_FILES[*]} " == *" ${PREFIX}prd.json "* ]]; then
+    STATE_FILES+=("${PREFIX}prd.json")
+  fi
+fi
+
 STALE_WARNING=$(ralph_issue_stale_warning "$PRD_FILE" "$SLUG")
 
 TITLE=$(ralph_jq '.description // empty' "$PRD_FILE")
@@ -142,13 +203,39 @@ trap 'rm -f "$BODY_FILE"' EXIT
   fi
   echo "## Stories ($PASSED/$TOTAL passing)"
   echo ""
-  ralph_jq '.userStories | sort_by(.priority)[] | "- [" + (if .passes == true then "x" else " " end) + "] " + .id + ": " + .title' "$PRD_FILE"
+  ralph_jq '(.source.approvedStoryIds // null) as $approved | .userStories | sort_by(.priority)[]
+    | "- [" + (if .passes == true then "x" else " " end) + "] " + .id + ": " + .title
+    + (if .passes != true and .blocked == true then " - **blocked**" else "" end)
+    + (if $approved != null and (.id as $id | $approved | index($id) | not) then " - _added during the loop, not approved by a human_" else "" end)' "$PRD_FILE"
   echo ""
+  BLOCKED=$(ralph_jq '.userStories | sort_by(.priority)[] | select(.passes != true and .blocked == true) | "### " + .id + ": " + .title + "
+
+" + (.blockedReason // "(no blockedReason given)") + "
+"' "$PRD_FILE")
+  if [ -n "$BLOCKED" ]; then
+    echo "## Blocked - needs a human"
+    echo ""
+    echo "$BLOCKED"
+    echo ""
+  fi
   NOTES=$(ralph_jq '.userStories | sort_by(.priority)[] | select((.notes // "") != "") | "### " + .id + ": " + .title + "\n\n" + .notes + "\n"' "$PRD_FILE")
   if [ -n "$NOTES" ]; then
     echo "## Notes"
     echo ""
     echo "$NOTES"
+    echo ""
+  fi
+  FOLLOWUPS=$(ralph_jq '(.followUps // [])[]
+    | ([.kind, (if (.foundIn // "") != "" then "found in " + .foundIn else null end)] | map(select(. != null and . != "")) | join(", ")) as $details
+    | "- " + (if .issue != null then "#" + (.issue | tostring) + " " else "" end) + (.title // "(no title)")
+    + (if $details != "" then " (" + $details + ")" else "" end)
+    + (if .issue == null then " - not filed" else "" end)' "$PRD_FILE")
+  if [ -n "$FOLLOWUPS" ]; then
+    echo "## Follow-ups found during the loop"
+    echo ""
+    echo "Outside the scope of this PR, reported by the agent and not verified."
+    echo ""
+    echo "$FOLLOWUPS"
     echo ""
   fi
   if [ -n "$STALE_WARNING" ]; then
@@ -171,6 +258,10 @@ if [ "$DRY_RUN" = true ]; then
   if [ ${#STATE_FILES[@]} -gt 0 ]; then
     echo "Would commit: ${STATE_FILES[*]}"
   fi
+  if [ "$FILE_FOLLOWUPS" = true ] && [ -n "$PENDING_FOLLOWUPS" ]; then
+    echo "Would file these follow-ups as issues in ${SLUG:-<unknown>}, then record the numbers in prd.json:"
+    ralph_jq '(.followUps // [])[] | select(.issue == null) | "  " + (.title // "(no title)")' "$PRD_FILE"
+  fi
   echo "Would run: git push -u $REMOTE $BRANCH"
   echo "Would run: gh pr create -R ${SLUG:-<unknown>} --base <default branch> ${CREATE_ARGS[*]}"
   echo "  (or gh pr edit --body-file if a PR for $BRANCH is already open)"
@@ -178,11 +269,6 @@ if [ "$DRY_RUN" = true ]; then
   echo "----- PR body -----"
   cat "$BODY_FILE"
   exit 0
-fi
-
-if [ -z "$SLUG" ]; then
-  echo "Error: Could not determine OWNER/REPO from remote '$REMOTE'."
-  exit 1
 fi
 
 if [ ${#STATE_FILES[@]} -gt 0 ]; then

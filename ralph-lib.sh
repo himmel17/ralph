@@ -7,6 +7,11 @@ ralph_jq() {
   jq -r "$@" | tr -d '\r'
 }
 
+# Print the number of stories with passes: true
+ralph_passed_count() {
+  ralph_jq '[.userStories[] | select(.passes == true)] | length' "$1"
+}
+
 # Print [HOST/]OWNER/REPO for a git remote, or nothing if it cannot be parsed.
 # Always pass the result to gh with -R: inside a fork, gh may otherwise
 # resolve to the parent repository.
