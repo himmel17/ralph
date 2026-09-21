@@ -1,5 +1,6 @@
 #!/bin/bash
-# Tests for ralph-pr.sh --dry-run. Runs offline: gh is replaced by a stub.
+# Tests for ralph-pr.sh. Runs offline: gh is replaced by a stub, and pushes go
+# to a local bare repository.
 # Usage: bash tests/test-ralph-pr.sh
 
 set -u
@@ -33,17 +34,52 @@ assert_exit() {
   if [ "$EXIT_CODE" -eq "$2" ]; then pass "$1"; else fail "$1 (exit $EXIT_CODE, expected $2)"; fi
 }
 
-# Stub gh: answers "issue view" with $FAKE_GH_UPDATED_AT, fails on anything else
+# Stub gh: logs every call to $GH_LOG, numbers created issues from 1, and keeps
+# the body files it was given in $GH_BODY_DIR
 STUB_DIR="$WORK_DIR/bin"
-mkdir -p "$STUB_DIR"
+export GH_LOG="$WORK_DIR/gh.log"
+export GH_BODY_DIR="$WORK_DIR/gh-bodies"
+mkdir -p "$STUB_DIR" "$GH_BODY_DIR"
+: > "$GH_LOG"
 cat > "$STUB_DIR/gh" << 'EOF'
 #!/bin/bash
-if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-  echo "${FAKE_GH_UPDATED_AT:-}"
-  exit 0
-fi
-echo "gh stub: unexpected call: $*" >&2
-exit 1
+echo "$*" >> "$GH_LOG"
+COMMAND="$1 $2"
+BODY_FILE=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--body-file" ]; then BODY_FILE="$2"; fi
+  shift
+done
+case "$COMMAND" in
+  "issue view")
+    echo "${FAKE_GH_UPDATED_AT:-}"
+    ;;
+  "label list")
+    echo "${FAKE_GH_LABELS:-}"
+    ;;
+  "issue create")
+    if [ "${FAKE_GH_ISSUE_FAIL:-}" = 1 ]; then
+      echo "gh stub: issues are disabled" >&2
+      exit 1
+    fi
+    N=$(( $(grep -c "^issue create" "$GH_LOG") ))
+    cp "$BODY_FILE" "$GH_BODY_DIR/issue-$N.md"
+    echo "https://github.com/example-owner/example-repo/issues/$N"
+    ;;
+  "pr list")
+    ;;
+  "repo view")
+    echo "main"
+    ;;
+  "pr create")
+    cp "$BODY_FILE" "$GH_BODY_DIR/pr.md"
+    echo "https://github.com/example-owner/example-repo/pull/100"
+    ;;
+  *)
+    echo "gh stub: unexpected call: $COMMAND" >&2
+    exit 1
+    ;;
+esac
 EOF
 chmod +x "$STUB_DIR/gh"
 export PATH="$STUB_DIR:$PATH"
@@ -147,6 +183,70 @@ run_pr --dry-run
 assert_exit "refuses the wrong branch" 1
 assert_contains "explains the branch mismatch" "expects 'ralph/test-feature'"
 git -C "$PROJECT" checkout -q ralph/test-feature
+
+# patch_prd <jq filter>
+patch_prd() {
+  jq "$1" "$RALPH_DIR/prd.json" | tr -d '' > "$RALPH_DIR/prd.json.tmp"
+  mv "$RALPH_DIR/prd.json.tmp" "$RALPH_DIR/prd.json"
+}
+
+count_calls() {
+  grep -c -- "^$1" "$GH_LOG" || true
+}
+
+FOLLOWUPS='[
+  {"id": "FU-001", "title": "Flaky date test", "body": "The date test fails around midnight.", "kind": "bug", "foundIn": "US-002", "evidence": "tests/date.test.ts:40", "issue": null},
+  {"id": "FU-002", "title": "Old one", "body": "Already filed.", "kind": "debt", "issue": 40}
+]'
+
+echo "Blocked story, added story and follow-ups (dry run)"
+write_prd false "$SOURCE"
+patch_prd ".followUps = $FOLLOWUPS | .source.approvedStoryIds = [\"US-001\"] | (.userStories[] | select(.id == \"US-002\")) |= . + {blocked: true, blockedReason: \"STRIPE_KEY is not set\"}"
+: > "$GH_LOG"
+run_pr --dry-run
+assert_exit "exits 0" 0
+assert_contains "marks the blocked and unapproved story" "- [ ] US-002: Second story - **blocked** - _added during the loop, not approved by a human_"
+assert_not_contains "leaves approved stories unmarked" "First story - _added"
+assert_contains "has a blocked section" "## Blocked - needs a human"
+assert_contains "gives the blocked reason" "STRIPE_KEY is not set"
+assert_contains "is a draft" "--draft"
+assert_contains "announces the follow-up it would file" "  Flaky date test"
+assert_contains "lists the unfiled follow-up" "- Flaky date test (bug, found in US-002) - not filed"
+assert_contains "lists the filed follow-up with its number" "- #40 Old one (debt)"
+if [ "$(count_calls "issue create")" -eq 0 ]; then pass "files nothing in a dry run"; else fail "files nothing in a dry run"; fi
+run_pr --dry-run --no-followups
+assert_not_contains "--no-followups announces no filing" "Would file these follow-ups"
+
+echo "Filing follow-ups (real run against a local remote)"
+git init -q --bare "$WORK_DIR/remote.git"
+BARE=$(cd "$WORK_DIR/remote.git" && { pwd -W 2>/dev/null || pwd; })
+git -C "$PROJECT" config "url.$BARE.pushInsteadOf" "https://github.com/example-owner/example-repo.git"
+write_prd true "$SOURCE"
+patch_prd ".followUps = $FOLLOWUPS"
+: > "$GH_LOG"
+run_pr
+assert_exit "exits 0" 0
+if [ "$(jq '.followUps[0].issue' "$RALPH_DIR/prd.json" | tr -d '')" = "1" ]; then pass "records the issue number in prd.json"; else fail "records the issue number in prd.json"; fi
+if grep -qF -- "issue create -R example-owner/example-repo --title Flaky date test" "$GH_LOG"; then pass "files in the origin repo explicitly"; else fail "files in the origin repo explicitly"; fi
+if grep -F -- "issue create" "$GH_LOG" | grep -qF -- "--label"; then fail "adds no label the repo does not have"; else pass "adds no label the repo does not have"; fi
+if grep -qF "while working on #12 (story US-002)" "$GH_BODY_DIR/issue-1.md" && grep -qF "tests/date.test.ts:40" "$GH_BODY_DIR/issue-1.md"; then pass "issue body names the origin and the evidence"; else fail "issue body names the origin and the evidence"; fi
+if grep -qF -- "- #1 Flaky date test" "$GH_BODY_DIR/pr.md"; then pass "PR body links the new issue"; else fail "PR body links the new issue"; fi
+if [ -z "$(git -C "$PROJECT" status --porcelain)" ]; then pass "commits prd.json with the number"; else fail "commits prd.json with the number"; fi
+if [ "$(git -C "$WORK_DIR/remote.git" rev-parse refs/heads/ralph/test-feature)" = "$(git -C "$PROJECT" rev-parse HEAD)" ]; then pass "pushes the branch"; else fail "pushes the branch"; fi
+run_pr
+if [ "$(count_calls "issue create")" -eq 1 ]; then pass "does not file the same follow-up twice"; else fail "does not file the same follow-up twice"; fi
+
+patch_prd '.followUps += [{"id": "FU-003", "title": "Second finding", "body": "x", "issue": null}]'
+: > "$GH_LOG"
+FAKE_GH_ISSUE_FAIL=1 run_pr
+assert_exit "a failed filing does not stop the PR" 0
+assert_contains "warns about the failed filing" "Could not file follow-up 'Second finding'"
+if [ "$(jq '.followUps[2].issue' "$RALPH_DIR/prd.json" | tr -d '')" = "null" ]; then pass "keeps the follow-up for a retry"; else fail "keeps the follow-up for a retry"; fi
+: > "$GH_LOG"
+run_pr --no-followups
+if [ "$(count_calls "issue create")" -eq 0 ]; then pass "--no-followups files nothing"; else fail "--no-followups files nothing"; fi
+FAKE_GH_LABELS="ralph-followup" run_pr
+if grep -F -- "issue create" "$GH_LOG" | grep -qF -- "--label ralph-followup"; then pass "adds the label when the repo has it"; else fail "adds the label when the repo has it"; fi
 
 echo "Remote URL forms"
 SCRIPT_DIR="$RALPH_DIR"
