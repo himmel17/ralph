@@ -58,7 +58,8 @@ Add `source` at the top level of `prd.json`, copying `number`, `url` and `update
     "type": "github-issue",
     "issue": 123,
     "url": "https://github.com/OWNER/REPO/issues/123",
-    "issueUpdatedAt": "2026-09-01T12:34:56Z"
+    "issueUpdatedAt": "2026-09-01T12:34:56Z",
+    "approvedStoryIds": ["US-001", "US-002"]
   },
   "userStories": []
 }
@@ -66,8 +67,9 @@ Add `source` at the top level of `prd.json`, copying `number`, `url` and `update
 
 - `issue` tells `ralph-pr.sh` which issue the PR closes.
 - `issueUpdatedAt` lets `ralph-safe.sh` and `ralph-pr.sh` warn when the issue changed after conversion. Copy the value verbatim; do not use the current time.
+- `approvedStoryIds` lists the id of every story the user approved in Step 4. The agent may add stories during the loop; this list is how `ralph-safe.sh` limits them and how `ralph-pr.sh` marks them in the PR.
 
-`prd.json` is a snapshot. If the issue's requirements change later, convert again instead of patching `prd.json` by hand.
+`prd.json` is a snapshot. If the issue's requirements change later, convert again instead of patching `prd.json` by hand (see Converting Again).
 
 ---
 
@@ -80,6 +82,19 @@ How the issue is split decides whether the loop succeeds, so a human checks it. 
 - Anything in the issue you left out, and why
 
 Save only after the user approves.
+
+---
+
+## Converting Again
+
+The loop stops when a story is blocked, and the fix is often a change to the issue. When `prd.json` already exists for the same issue and the same `branchName`, do not start over and do not archive:
+
+1. Keep every story with `passes: true` exactly as it is. If the new requirements invalidate one, set it back to `passes: false` and tell the user.
+2. Rewrite the remaining stories from the current issue. Drop `blocked` and `blockedReason`.
+3. Keep `followUps` exactly as it is; entries with an `issue` number are already filed.
+4. Update `source.issueUpdatedAt`, get approval again (Step 4), and set `source.approvedStoryIds` to all story ids the user approved.
+
+If the block had nothing to do with the requirements (a missing credential, for example), no conversion is needed: the user removes `blocked` from the story and runs `ralph-safe.sh` again.
 
 ---
 
@@ -105,5 +120,6 @@ Tell the user the next steps:
 
 - [ ] Every item of the `ralph` skill's checklist holds
 - [ ] `source.issue`, `source.url` and `source.issueUpdatedAt` are copied verbatim from `gh`
+- [ ] `source.approvedStoryIds` lists every approved story id
 - [ ] The issue was not modified
 - [ ] The user approved the story split
