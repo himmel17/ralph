@@ -171,7 +171,8 @@ Load the ralph-issue skill and convert issue #12 to prd.json
   "type": "github-issue",
   "issue": 12,
   "url": "https://github.com/OWNER/REPO/issues/12",
-  "issueUpdatedAt": "2026-09-01T12:34:56Z"
+  "issueUpdatedAt": "2026-09-01T12:34:56Z",
+  "approvedStoryIds": ["US-001", "US-002"]
 }
 ```
 
@@ -183,9 +184,35 @@ Load the ralph-issue skill and convert issue #12 to prd.json
 ./scripts/ralph/ralph-safe.sh --tool claude [max_iterations]
 ```
 
-`ralph-safe.sh` は引数をそのまま `ralph.sh` に渡します。ループの実行中は、`gh` がログアウト状態になり（空の `GH_CONFIG_DIR` を使います）、`origin` の push URL が `DISABLED` に設定されます。どちらもループの終了時に元に戻ります。スクリプトが強制終了された場合は、次回の実行時に最初に push URL を復元します。`origin` 以外の remote を保護するには、`RALPH_REMOTE` を設定してください。
+`ralph-safe.sh` は `ralph.sh` と同じ引数を受け取ります。ループの実行中は、`gh` がログアウト状態になり（空の `GH_CONFIG_DIR` を使います）、`origin` の push URL が `DISABLED` に設定されます。どちらもループの終了時に元に戻ります。スクリプトが強制終了された場合は、次回の実行時に最初に push URL を復元します。`origin` 以外の remote を保護するには、`RALPH_REMOTE` を設定してください。
 
 これは事故を防ぐためのものであり、サンドボックスではありません。権限チェックなしで動くエージェントは、この設定を元に戻すことができます。
+
+#### 離席中にエージェントが見つけた問題
+
+ループを見ている人はいないので、エージェントは見つけたことを `prd.json` に記録します（規則は `CLAUDE.md` と `prompt.md` にあります）。
+
+| 見つけたもの | エージェントの動作 | その後に起きること |
+|---|---|---|
+| それが無いと Issue を完了できないもの | story を追加または分割し、理由を `notes` に書きます | PR は、`source.approvedStoryIds` に無い story を全て明示します |
+| Issue の範囲外のもの（バグ、技術的負債、アイデア） | 修正せず、`followUps` に追記します | `ralph-pr.sh` が新しい Issue として起票します |
+| 自力で完了できない story | story に `blocked` と `blockedReason` を設定します | ループが止まります |
+
+#### ループが途中で止まる場合
+
+`ralph-safe.sh` は `ralph.sh` を 1 イテレーションずつ実行し、その合間に `prd.json` を読みます。そのため、エージェントの発言には依存しません。
+
+```bash
+echo $?   # 0 done, 1 max iterations, 2 blocked, 3 no progress, 4 guard
+```
+
+- **2 - blocked:** `blocked: true` の story があります。後続の story は通常その story を前提にしているので、ループは最初の 1 件で止まります。理由は画面に表示され、draft PR にも載ります。
+- **3 - no progress:** 3 イテレーション連続で、新たに pass した story がありません（`RALPH_STALL_LIMIT`）。レート制限などでツールが起動に失敗している場合も、これで止まります。
+- **4 - guard:** `prd.json` が読めなくなった、`source` が変更された、または story が 3 件を超えて追加された場合です（`RALPH_MAX_ADDED_STORIES`）。
+
+blocked の後に再開するには、原因が環境（認証情報の不足など）であれば、それを直して story から `blocked` を削除し、`ralph-safe.sh` をもう一度実行します。要件が誤っていた場合は、Issue を直して変換をやり直します。skill は完了済みの story を保持します。blocked の story が残っている間、`ralph-safe.sh` は起動を拒否します。
+
+`ralph.sh` を直接実行した場合は、これらの停止は一切働きません。
 
 ### 4. ローカルで確認してから PR を作成する
 
@@ -200,8 +227,9 @@ push するまでは、失敗した実行に代償はありません。branch �
 - 未完了の story が残っている場合: `Refs #12` を付けた **draft** PR を作成します。そのため、merge しても Issue は閉じません。
 - その branch の PR が既に開いている場合: 本文だけを更新します。
 - `prd.json` に `source` が無い場合: `--issue 12` を渡してください。省略すると、どの Issue も参照しない PR を作成します。
+- `prd.json` に `followUps` がある場合: PR の前に 1 件ずつ新しい Issue として起票し、その番号を `prd.json` に書き戻します。そのため、再実行しても二重に起票しません。リポジトリに `ralph-followup` ラベルがあれば付与します（`RALPH_FOLLOWUP_LABEL`）。内容は `--dry-run` で確認でき、`--no-followups` で起票を省略できます。起票に失敗しても（Issues が無効な場合など）、PR の作成は止まりません。
 
-PR の本文には、全ての story とその状態、notes が並びます。`ralph-pr.sh` は、branch が違う場合と、`prd.json` と `progress.txt` 以外に未コミットの変更がある場合には、実行を拒否します。
+PR の本文には、全ての story とその状態、notes が並び、blocked の story とループ中に追加された story が明示され、follow-up へのリンクが載ります。`ralph-pr.sh` は、branch が違う場合と、`prd.json` と `progress.txt` 以外に未コミットの変更がある場合には、実行を拒否します。
 
 ### 5. merge は自分で行う
 
@@ -217,9 +245,10 @@ Issue は小さく保ってください。全ての story が 1 つの PR に入
 
 ```bash
 bash tests/test-ralph-pr.sh
+bash tests/test-ralph-safe.sh
 ```
 
-このテストは、一時的なリポジトリで `ralph-pr.sh --dry-run` を実行し、`gh` をスタブに差し替えるので、ネットワーク接続を必要としません。
+このテストは、一時的なリポジトリで、スタブの `gh`、スタブの `ralph.sh`、ローカルの bare remote を使って実行するので、ネットワーク接続を必要としません。
 
 ## 主なファイル
 
@@ -237,7 +266,7 @@ bash tests/test-ralph-pr.sh
 | `ralph-safe.sh` | `gh` をログアウト状態にし、push を無効にして `ralph.sh` を実行する |
 | `ralph-pr.sh` | ループの後に branch を push し、`prd.json` から PR を作成する |
 | `ralph-lib.sh` | `ralph-safe.sh` と `ralph-pr.sh` が共有するヘルパー |
-| `tests/` | `ralph-pr.sh` のオフラインテスト |
+| `tests/` | `ralph-pr.sh` と `ralph-safe.sh` のオフラインテスト |
 | `.claude-plugin/` | Claude Code marketplace から発見されるための plugin マニフェスト |
 | `flowchart/` | Ralph の仕組みを示すインタラクティブな可視化 |
 

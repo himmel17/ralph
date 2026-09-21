@@ -171,7 +171,8 @@ The skill reads the issue, applies the same rules as the `ralph` skill, shows yo
   "type": "github-issue",
   "issue": 12,
   "url": "https://github.com/OWNER/REPO/issues/12",
-  "issueUpdatedAt": "2026-09-01T12:34:56Z"
+  "issueUpdatedAt": "2026-09-01T12:34:56Z",
+  "approvedStoryIds": ["US-001", "US-002"]
 }
 ```
 
@@ -183,9 +184,35 @@ The skill reads the issue, applies the same rules as the `ralph` skill, shows yo
 ./scripts/ralph/ralph-safe.sh --tool claude [max_iterations]
 ```
 
-`ralph-safe.sh` passes its arguments to `ralph.sh`. While the loop runs, `gh` is logged out (an empty `GH_CONFIG_DIR`) and the push URL of `origin` is set to `DISABLED`. Both are restored when the loop ends; if the script is killed, the next run restores the push URL first. Set `RALPH_REMOTE` to protect a remote other than `origin`.
+`ralph-safe.sh` takes the same arguments as `ralph.sh`. While the loop runs, `gh` is logged out (an empty `GH_CONFIG_DIR`) and the push URL of `origin` is set to `DISABLED`. Both are restored when the loop ends; if the script is killed, the next run restores the push URL first. Set `RALPH_REMOTE` to protect a remote other than `origin`.
 
 This guards against accidents. It is not a sandbox: an agent running without permission checks could undo it.
+
+#### Problems the agent finds while you are away
+
+Nobody watches the loop, so the agent records what it finds in `prd.json` (the rules are in `CLAUDE.md` and `prompt.md`):
+
+| What it finds | What the agent does | What happens next |
+|---|---|---|
+| The issue cannot be finished without it | Adds or splits a story, with the reason in `notes` | The PR marks every story that is not in `source.approvedStoryIds` |
+| Anything outside the issue (a bug, tech debt, an idea) | Does not fix it; appends it to `followUps` | `ralph-pr.sh` files it as a new issue |
+| A story it cannot finish itself | Sets `blocked` and `blockedReason` on the story | The loop stops |
+
+#### When the loop stops early
+
+`ralph-safe.sh` runs `ralph.sh` one iteration at a time and reads `prd.json` in between, so it does not depend on what the agent says:
+
+```bash
+echo $?   # 0 done, 1 max iterations, 2 blocked, 3 no progress, 4 guard
+```
+
+- **2 - blocked:** a story has `blocked: true`. The loop stops at the first one, because later stories usually build on it. The reason is printed and goes into the draft PR.
+- **3 - no progress:** no new story passed for 3 iterations in a row (`RALPH_STALL_LIMIT`). This also catches a tool that fails to start, such as a rate limit.
+- **4 - guard:** `prd.json` became unreadable, its `source` changed, or more than 3 stories were added (`RALPH_MAX_ADDED_STORIES`).
+
+To resume after a block: if the cause was the environment (a missing credential), fix it, remove `blocked` from the story, and run `ralph-safe.sh` again. If the requirements were wrong, fix the issue and convert it again; the skill keeps the finished stories. `ralph-safe.sh` refuses to start while a story is blocked.
+
+Running `ralph.sh` directly gives you none of these stops.
 
 ### 4. Review locally, then open the PR
 
@@ -200,8 +227,9 @@ Until you push, a bad run costs nothing: reset the branch and run again. When th
 - Some stories still fail: a **draft** PR with `Refs #12`, so merging it cannot close the issue.
 - A PR for the branch is already open: only its body is updated.
 - `prd.json` has no `source`: pass `--issue 12`, or omit it to open a PR that references no issue.
+- `prd.json` has `followUps`: each one is filed as a new issue first, and its number is written back to `prd.json`, so running again files nothing twice. They get the label `ralph-followup` if the repository has it (`RALPH_FOLLOWUP_LABEL`). Check them with `--dry-run`, skip them with `--no-followups`. A failed filing (issues disabled, for example) does not stop the PR.
 
-The PR body lists every story with its status and notes. `ralph-pr.sh` refuses to run on the wrong branch or with uncommitted changes other than `prd.json` and `progress.txt`.
+The PR body lists every story with its status and notes, marks blocked stories and stories added during the loop, and links the follow-ups. `ralph-pr.sh` refuses to run on the wrong branch or with uncommitted changes other than `prd.json` and `progress.txt`.
 
 ### 5. Merge it yourself
 
@@ -217,9 +245,10 @@ Run the scripts through Git Bash: `bash scripts/ralph/ralph-safe.sh --tool claud
 
 ```bash
 bash tests/test-ralph-pr.sh
+bash tests/test-ralph-safe.sh
 ```
 
-The tests run `ralph-pr.sh --dry-run` in a temporary repository with a stub `gh`, so they need no network access.
+The tests run in a temporary repository with a stub `gh`, a stub `ralph.sh` and a local bare remote, so they need no network access.
 
 ## Key Files
 
@@ -237,7 +266,7 @@ The tests run `ralph-pr.sh --dry-run` in a temporary repository with a stub `gh`
 | `ralph-safe.sh` | Runs `ralph.sh` with `gh` logged out and pushing disabled |
 | `ralph-pr.sh` | Pushes the branch and opens the PR from `prd.json` after the loop |
 | `ralph-lib.sh` | Helpers shared by `ralph-safe.sh` and `ralph-pr.sh` |
-| `tests/` | Offline tests for `ralph-pr.sh` |
+| `tests/` | Offline tests for `ralph-pr.sh` and `ralph-safe.sh` |
 | `.claude-plugin/` | Plugin manifest for Claude Code marketplace discovery |
 | `flowchart/` | Interactive visualization of how Ralph works |
 
